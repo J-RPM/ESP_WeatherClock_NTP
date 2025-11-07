@@ -26,3 +26,9 @@ Use the Arduino IDE:
 
 ## Credits
 Developed by J-RPM.  
+
+YouTube: 
+https://youtu.be/hKXPpA2Ls1I
+
+Website:
+https://wp.me/paKnHQ-Y2
