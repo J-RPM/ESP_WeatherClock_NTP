@@ -2,7 +2,7 @@
                              ***** ESP_NTP_Weather ******
                              * Compatible ESP32/ESP8266 *
                              ****************************
-       (v1.11) >>> Muestra la Fecha, Hora y los datos meteorológicos
+       (v1.14) >>> Muestra la Fecha, Hora y los datos meteorológicos
                                Copyright: J_RPM 
                                http://j-rpm.com/
                         https://www.youtube.com/c/JRPM
@@ -97,19 +97,34 @@
 #include <time.h>
 #include <DNSServer.h>
 #include <WiFiManager.h>  // https://github.com/tzapu/WiFiManager
+//#include <regex>
+
 /////////////////////////////////////////////////////////////////
 #include <EEPROM.h>
+#define CONFIG_VERSION 0x0002  // Incrementar cuando cambie la estructura
 
-#define EEPROM_SIZE      512
-#define API_KEY_ADDR     0
-#define API_KEY_LEN      80
-#define CITY_ID_ADDR     (API_KEY_ADDR + API_KEY_LEN)
-#define CITY_ID_LEN      40
-#define ZONE2_ADDR       (CITY_ID_ADDR + CITY_ID_LEN)
-#define ZONE2_LEN        20
-#define USE_ZONE2_ADDR   (ZONE2_ADDR + ZONE2_LEN)
+#define EEPROM_SIZE        512   
+
+#define API_KEY_ADDR       0
+#define API_KEY_LEN        80
+
+#define CITY_ID_ADDR       (API_KEY_ADDR + API_KEY_LEN)
+#define CITY_ID_LEN        40
+
+#define ZONE2_ADDR         (CITY_ID_ADDR + CITY_ID_LEN)
+#define ZONE2_LEN          20
+
+#define USE_ZONE2_ADDR     (ZONE2_ADDR + ZONE2_LEN)
+#define USE_ZONE2_LEN      1
+
+/////////////////////////////////
+// Total usado: 0 → 141 bytes //
+/////////////////////////////////
 
 // ===================== CONFIGURACIÓN =====================
+static String HWversion = "(v1.14)";
+bool Test = false;  // Test de los iconos del tiempo en OLED
+String CurrentTime, CurrentDate, webpage = "";
 
 String apiKey = "";
 String cityID = "";
@@ -118,6 +133,42 @@ String zone2  = "UTC+0";
 bool   T_Zone2 = false;
 float temp, feels, humidity, pressure, wind;
 int deg;
+
+/////////////////////////////////////////////////////////////////////////// 
+// === Estructura extendida para datos de forecast (v14 — ajustes pop%, viento km/h) ===
+/////////////////////////////////////////////////////////////////////////// 
+struct ForecastData {
+  char hora[6];           // HH:MM local
+  char icono[4];          // Código de icono (ej. 04d)
+  float temperatura;      // Temperatura actual
+  float temp_min;         // Temperatura mínima
+  float temp_max;         // Temperatura máxima
+  float feels_like;       // Sensación térmica
+  float pressure;         // Presión atmosférica (hPa)
+  int humidity;           // Humedad relativa (%)
+  int pop;                // Probabilidad de lluvia (%) — convertido de 0–1 a 0–100
+  float rain_3h;          // Precipitación (mm/3h)
+  float wind_speed;       // Velocidad viento (km/h) — convertida desde m/s
+  int wind_deg;           // Dirección viento (grados)
+  int clouds;             // Nubosidad (%)
+  char description[40];   // Descripción textual
+};
+
+#define FORECAST_COUNT 3
+ForecastData forecast[FORECAST_COUNT];
+unsigned long lastForecastTime = 0;  // millis() última actualización
+
+// Globales para sunrise/sunset/timezone (usadas por forecast)
+unsigned long gSunrise = 0;
+unsigned long gSunset  = 0;
+long gTimezoneShift    = 0;
+
+// === Variables globales para el sol ===
+String inicioSol = "--:--";
+String finalSol  = "--:--";
+String tiempoSol = "--:--";
+
+// ===============================================================
 String weatherLoc;
 String weatherIcon = "01d";                     // por ejemplo, "01d", "02n"
 String weatherDesc = "Cielo despejado";         // texto descriptivo
@@ -125,15 +176,10 @@ const String units = "metric";                  // "metric" = °C
 const String lang  = "es";                      // Idioma de descripción
 
 /////////////////////////////////////////////////////////////////
-
-static String HWversion = "(v1.11)";
-bool Test = false;  // Test de los iconos del tiempo en OLED
-String CurrentTime, CurrentDate, webpage = "";
-
-
 // ===================== TIMING =====================
 const unsigned long weatherUpdateInterval = 600000; // 10 minutos
-const unsigned long screenInterval = 5000;          // cambio de pantalla cada 5s
+const unsigned long screenInterval = 8000;          // cambio de pantalla cada 8"
+const unsigned long previsionInterval = 4000;       // cambio cada 4" cuando se muestra la previsión
 long timeConnect;
 
 // ===================== DISPLAY OLED =====================
@@ -146,7 +192,9 @@ Adafruit_SSD1306 display(OLED_RESET);
 // ===================== VARIABLES =====================
 unsigned long lastWeatherUpdate = 0;
 unsigned long lastScreenChange = 0;
+unsigned long lastIntervalChange = 0;
 int currentScreen = 0;
+bool nScreen = false;
 int s;
 
 // Turn on debug statements to the serial output
@@ -196,6 +244,16 @@ void configurarPantalla() {
   } else {
     PRINTS("\n*** OLED 64x48 ****");
   }
+}
+//////////////////////////////////////////////////////////////////
+// === Mostrar información de memoria libre ===
+//////////////////////////////////////////////////////////////////
+void imprimirHeapInfo() {
+#if defined(ESP8266)
+  Serial.printf("[ESP8266] Memoria libre inicial: %u bytes\n", ESP.getFreeHeap());
+#elif defined(ESP32)
+  Serial.printf("[ESP32] Memoria libre inicial: %u bytes\n", ESP.getFreeHeap());
+#endif
 }
 /////////////////////////////////////////////////////////////////////////////////////////////
 // ===================== SETUP =====================
@@ -287,9 +345,6 @@ void setup() {
   display_ip();
   display_flash();
 
-  // Carga la configuración de la EEPROM
-  EEPROM.begin(EEPROM_SIZE);
-  loadConfig();
 
   // Syncronize Time and Date
   if (!SetupTime()) {
@@ -297,16 +352,28 @@ void setup() {
     ESP.restart();
   }
 
-  // Muestra la hora local después de sincronizar
-  mostrarHoraLocal();
-
-
-  // Habilita las entradas Web
-  checkServer();
-
+  
+  // Muestra memoria libre inicial y antes de parsear el JSON
+  imprimirHeapInfo();
+  
+  // Carga la configuración de la EEPROM (API key, city, zone, etc.)
+  EEPROM.begin(EEPROM_SIZE);
+  loadConfig();
+  
   obtenerClima();
   lastWeatherUpdate = millis();
   lastScreenChange = millis();
+  lastIntervalChange = millis();
+  
+  // Forzar actualización inicial del forecast (en frío)
+  PRINTS("\nForzando actualización de forecast inicial...");
+  // Hacemos que parezca que la última actualización fue hace más de 2h
+  //lastForecastTime = millis() - (2UL * 60UL * 60UL * 1000UL) - 1000UL;
+  lastForecastTime = 0;  // forzar actualización inmediata
+  actualizarForecast();  // Ejecuta la consulta inicial
+   
+  // Habilita las entradas Web
+  checkServer();
 }
 ///////////////////////////////////////////////////////////////////////
 // ===================== LOOP =====================
@@ -368,13 +435,20 @@ void loop() {
       }
       // Sensación Térmica
       cagarFeels();
-     // Velocidad del viento
-     cargarViento();
-     display.display();
+      // Velocidad del viento
+      cargarViento();
   }else {
     // Si se está mostrando la fecha y hora, se actualiza
     if (currentScreen == 2) {
       Oled_Time();
+    // Si se está mostrando la previsión del tiempo, gestiona los cambios
+    }else if (!Test && (millis() - lastIntervalChange > previsionInterval)) {
+      // Alterna la información de la previsión a mostrar
+      if (currentScreen == 3) {
+        previsionWeather();
+      }else if (currentScreen == 4) {
+        previsionWeather2();
+      }
     }
   }
 
@@ -382,20 +456,19 @@ void loop() {
   // Vuelve a cargar el estado actual del clima 
   if (millis() - lastWeatherUpdate > weatherUpdateInterval) {
     obtenerClima();
+    // Actualiza cada 2h solo si corresponde
+    actualizarForecast();  
   }
+
 
   // Selecciona la pantalla a mostrar
   if (millis() - lastScreenChange > screenInterval) {
-    currentScreen = (currentScreen + 1) % 3; // tres pantallas
+    currentScreen = (currentScreen + 1) % 6; // ahora 6 pantallas
     if (!Test) mostrarPantalla(currentScreen);
     lastScreenChange = millis();
   }
 }
-
-// ===================== FUNCIÓN: OBTENER CLIMA =====================
-void obtenerClima() {
-  if (WiFi.status() == WL_CONNECTED) {
-    HTTPClient http;
+// ==================================================================
     /*
     // City
     String url = "http://api.openweathermap.org/data/2.5/weather?q=" + city +
@@ -404,7 +477,12 @@ void obtenerClima() {
     String url = "http://api.openweathermap.org/data/2.5/weather?lat=" + lat + "&lon=" + lon + "&appid=" + apiKey
              + "&units=" + units + "&lang=" + lang;
     */
-    
+//////////////////////////////////////////////////////////////////
+// ===================== FUNCIÓN: OBTENER CLIMA =====================
+//////////////////////////////////////////////////////////////////
+void obtenerClima() {
+  if (WiFi.status() == WL_CONNECTED) {
+    HTTPClient http;
     // City ID
     String url = "http://api.openweathermap.org/data/2.5/weather?id=" + cityID +
                  "&appid=" + apiKey + "&units=" + units + "&lang=" + lang;
@@ -417,39 +495,353 @@ void obtenerClima() {
       WiFiClient client;
       http.begin(client, url);  // ESP8266 necesita cliente explícito
     #endif
-    
+
+    http.setTimeout(15000);
     int httpCode = http.GET();
 
-    if (httpCode == 200) {
+    if (httpCode == HTTP_CODE_OK) {
       String payload = http.getString();
-      PRINT("\n>>> payload: ",payload);
-      DynamicJsonDocument doc(2048);
-      deserializeJson(doc, payload);
+      PRINT("\n>>> payload: ", payload);
 
+      // Parseo seguro (tamaño ampliado para evitar NoMemory en ESP32/ESP8266)
+      DynamicJsonDocument doc(4096);
+      DeserializationError err = deserializeJson(doc, payload);
+      if (err) {
+        PRINT("\nError parseando JSON weather: ", err.c_str());
+        mostrarError("JSON");
+        limpiarDatosClima();
+        http.end();
+        return;
+      }
+
+      // Valores principales
       temp = doc["main"]["temp"].as<float>();
       feels = doc["main"]["feels_like"].as<float>();
       humidity = doc["main"]["humidity"].as<float>();
       pressure = doc["main"]["pressure"].as<float>();
-      wind = (doc["wind"]["speed"].as<float>()) * 3.6; // ms >>> kmh
+      wind = (doc["wind"]["speed"].as<float>()) * 3.6; // ms >>> km/h
       deg = doc["wind"]["deg"].as<int>();
       weatherDesc = doc["weather"][0]["description"].as<String>();
       weatherDesc.toUpperCase();  // convierte a mayúsculas
       weatherLoc = doc["name"].as<String>();
-      weatherLoc = weatherLoc.substring(0, 10);
-      weatherLoc.toUpperCase();  // convierte a mayúsculas
+      if (weatherLoc.length() > 10) weatherLoc = weatherLoc.substring(0, 10);
+      weatherLoc.toUpperCase();
       weatherIcon = doc["weather"][0]["icon"].as<String>();
-      
+
+      // —— EXTRAER sunrise/sunset/timezone y guardarlos globalmente ——
+      if (!doc["sys"].isNull()) {
+        if (doc["sys"]["sunrise"].is<unsigned long>()) {
+          gSunrise = (unsigned long)doc["sys"]["sunrise"].as<unsigned long>();
+        } else {
+          gSunrise = 0;
+        }
+        if (doc["sys"]["sunset"].is<unsigned long>()) {
+          gSunset = (unsigned long)doc["sys"]["sunset"].as<unsigned long>();
+        } else {
+          gSunset = 0;
+        }
+      }
+      if (doc["timezone"].is<long>()) {
+        gTimezoneShift = (long)doc["timezone"].as<long>();
+      } else {
+        gTimezoneShift = 0;
+      }
+
+      Serial.printf("\n[INFO] Guardados globals sunrise=%lu sunset=%lu tz=%ld\n",
+                    gSunrise, gSunset, gTimezoneShift);
+
+      // Actualiza Strings legibles de amanecer/puesta/duración
+      actualizarSunTimes(gSunrise, gSunset, gTimezoneShift);
+      Serial.printf("[INFO] inicioSol='%s' finalSol='%s' tiempoSol='%s'\n",
+                    inicioSol.c_str(), finalSol.c_str(), tiempoSol.c_str());
+
+      // Actualizar pantalla con los nuevos datos
       mostrarPantalla(currentScreen);
+
     } else {
-      PRINT("\nError HTTP: ",httpCode);
+      PRINT("\nError HTTP: ", httpCode);
       mostrarError(String(httpCode));
+      limpiarDatosClima();
       currentScreen = 0;
       lastScreenChange = millis();
+      lastIntervalChange = millis();
     }
     http.end();
     lastWeatherUpdate = millis();
   } else {
     mostrarError("WiFi");
+  }
+}
+//////////////////////////////////////////////////////////////////
+// === LIMPIAR DATOS DE CLIMA (usado cuando falla la consulta) ===
+//////////////////////////////////////////////////////////////////
+void limpiarDatosClima() {
+  temp = 0.0;
+  feels = 0.0;
+  humidity = 0.0;
+  pressure = 0.0;
+  wind = 0.0;
+  deg = 0;
+  weatherDesc = "---";
+  weatherLoc = "---";
+  weatherIcon = "--";
+}
+//////////////////////////////////////////////////////////////////////////////////////
+// === ACTUALIZAR FORECAST (v14 — ajustes pop %, viento km/h y salida completa) === //
+//////////////////////////////////////////////////////////////////////////////////////
+void actualizarForecast() {
+  unsigned long ahora = millis();
+  const unsigned long intervaloForecast = 7200000UL; // 2h
+
+  if (lastForecastTime != 0 && (ahora - lastForecastTime) < intervaloForecast) {
+    PRINTS("\nForecast reciente, usando datos guardados.");
+    return;
+  }
+
+  if (WiFi.status() != WL_CONNECTED) {
+    PRINTS("\nSin WiFi: no se puede actualizar forecast.");
+    return;
+  }
+
+  String url = "http://api.openweathermap.org/data/2.5/forecast?id=" + cityID +
+               "&appid=" + apiKey + "&units=metric&lang=" + lang;
+
+  PRINTS("\nSolicitando forecast: ");
+  Serial.print(url);
+
+  WiFiClient client;
+  HTTPClient http;
+#ifdef ESP32
+  http.begin(url);
+#else
+  http.begin(client, url);
+#endif
+  http.setTimeout(25000);
+  int httpCode = http.GET();
+  if (httpCode != HTTP_CODE_OK) {
+    PRINT("\nError HTTP forecast: ", httpCode);
+    http.end();
+    return;
+  }
+
+  WiFiClient *stream = http.getStreamPtr();
+  String buffer;
+  int count = 0;
+  int searchPos = 0;
+
+  unsigned long sunrise = gSunrise;
+  unsigned long sunset  = gSunset;
+  long timezoneShift    = gTimezoneShift;
+
+  PRINTS("\nLeyendo forecast por streaming (v14 extendida)...\n");
+  Serial.printf("[INFO] Sunrise global=%lu sunset=%lu tz=%ld\n", sunrise, sunset, timezoneShift);
+
+  // === Bucle de lectura ===
+  while (stream->connected() && count < FORECAST_COUNT) {
+    while (stream->available()) {
+      char c = stream->read();
+      if (c != '\r') buffer += c;
+    }
+    if (buffer.length() < 300) { delay(1); continue; }
+
+    bool foundAny = false;
+    while (true) {
+      int idxHora = buffer.indexOf("\"dt_txt\":\"", searchPos);
+      if (idxHora < 0) break;
+
+      // --- Buscar timestamp (dt) ---
+      int idxDt = buffer.lastIndexOf("\"dt\":", idxHora);
+      unsigned long dtForecast = 0;
+      if (idxDt > 0) {
+        int endDt = buffer.indexOf(",", idxDt);
+        if (endDt > 0) dtForecast = buffer.substring(idxDt + 5, endDt).toInt();
+      }
+
+      // dt_txt ya contiene hora local
+      int startH = idxHora + 10;
+      int endH = buffer.indexOf("\"", startH);
+      if (endH < 0) break;
+      String horaFull = buffer.substring(startH, endH);
+      String horaGuardar = (horaFull.length() >= 16) ? horaFull.substring(11, 16) : "--:--";
+
+      int nextHora = buffer.indexOf("\"dt_txt\":\"", endH + 10);
+      int searchEnd = (nextHora > 0) ? nextHora : buffer.length();
+
+      // === Localizar principales campos ===
+      int idxIcon  = buffer.indexOf("\"icon\":\"", idxHora);
+      int idxTemp  = buffer.indexOf("\"temp\":", idxHora);
+      int idxTmin  = buffer.indexOf("\"temp_min\":", idxHora);
+      int idxTmax  = buffer.indexOf("\"temp_max\":", idxHora);
+      int idxFeels = buffer.indexOf("\"feels_like\":", idxHora);
+      int idxPress = buffer.indexOf("\"pressure\":", idxHora);
+      int idxHum   = buffer.indexOf("\"humidity\":", idxHora);
+      int idxPop   = buffer.indexOf("\"pop\":", idxHora);
+      int idxRain  = buffer.indexOf("\"rain\":", idxHora);
+      int idxWindS = buffer.indexOf("\"speed\":", idxHora);
+      int idxWindD = buffer.indexOf("\"deg\":", idxHora);
+      int idxCloud = buffer.indexOf("\"clouds\":", idxHora);
+      int idxDesc  = buffer.indexOf("\"description\":\"", idxHora);
+
+#if DEBUG
+      Serial.printf("\n[DEBUG #%d] dtForecast=%lu  HoraTxt(local)=%s\n", count, dtForecast, horaGuardar.c_str());
+      int dbgStart = max(0, idxHora - 80);
+      size_t dbgLen = min((size_t)400, (size_t)(buffer.length() - dbgStart));
+      Serial.println(buffer.substring(dbgStart, dbgStart + dbgLen));
+      Serial.println(F("-----------------------------"));
+#endif
+
+      // === Extracción de valores ===
+      String icono = (idxIcon > 0) ? buffer.substring(idxIcon + 8, idxIcon + 11) : "--";
+      float temp   = (idxTemp > 0)  ? buffer.substring(idxTemp + 7, buffer.indexOf(",", idxTemp)).toFloat() : NAN;
+      float tmin   = (idxTmin > 0)  ? buffer.substring(idxTmin + 11, buffer.indexOf(",", idxTmin)).toFloat() : NAN;
+      float tmax   = (idxTmax > 0)  ? buffer.substring(idxTmax + 11, buffer.indexOf(",", idxTmax)).toFloat() : NAN;
+      float feels  = (idxFeels > 0) ? buffer.substring(idxFeels + 13, buffer.indexOf(",", idxFeels)).toFloat() : NAN;
+      float press  = (idxPress > 0) ? buffer.substring(idxPress + 11, buffer.indexOf(",", idxPress)).toFloat() : NAN;
+      int hum      = (idxHum > 0)   ? buffer.substring(idxHum + 11, buffer.indexOf(",", idxHum)).toInt() : -1;
+
+      // --- POP (convertido a %) ---
+      int pop = 0;
+      if (idxPop > 0) {
+        float popF = buffer.substring(idxPop + 6, buffer.indexOf(",", idxPop)).toFloat();
+        pop = int(popF * 100.0);
+      }
+
+      // --- Lluvia (mm/3h)
+      float rain3h = 0;
+      if (idxRain > 0) {
+        int idx3h = buffer.indexOf("\"3h\":", idxRain);
+        if (idx3h > 0) rain3h = buffer.substring(idx3h + 5, buffer.indexOf("}", idx3h)).toFloat();
+      }
+
+      // --- Viento (m/s → km/h)
+      float windS = NAN;
+      if (idxWindS > 0) {
+        float windMs = buffer.substring(idxWindS + 8, buffer.indexOf(",", idxWindS)).toFloat();
+        windS = windMs * 3.6;
+      }
+
+      int windD = (idxWindD > 0) ? buffer.substring(idxWindD + 6, buffer.indexOf("}", idxWindD)).toInt() : -1;
+      int clouds = 0;
+      int idxAll = buffer.indexOf("\"all\":", idxCloud);
+      if (idxAll > 0) clouds = buffer.substring(idxAll + 6, buffer.indexOf("}", idxAll)).toInt();
+      String desc = (idxDesc > 0) ? buffer.substring(idxDesc + 15, buffer.indexOf("\"", idxDesc + 15)) : "--";
+
+      // === Guardar los valores extraídos ===
+      if (horaGuardar != "--:--" && icono != "--" && !isnan(temp)) {
+        horaGuardar.toCharArray(forecast[count].hora, sizeof(forecast[count].hora));
+        icono.toCharArray(forecast[count].icono, sizeof(forecast[count].icono));
+        desc.toCharArray(forecast[count].description, sizeof(forecast[count].description));
+
+        forecast[count].temperatura = temp;
+        forecast[count].temp_min    = tmin;
+        forecast[count].temp_max    = tmax;
+        forecast[count].feels_like  = feels;
+        forecast[count].pressure    = press;
+        forecast[count].humidity    = hum;
+        forecast[count].pop         = pop;
+        forecast[count].rain_3h     = rain3h;
+        forecast[count].wind_speed  = windS;
+        forecast[count].wind_deg    = windD;
+        forecast[count].clouds      = clouds;
+
+        // --- Nueva salida completa ---
+        Serial.printf("Forecast %d  Hora:%s  T=%.1f°C  Feels=%.1f  Min=%.1f  Max=%.1f  Hum=%d%%  Pop=%d%%  Rain=%.1fmm  Viento=%.1fkm/h (%d°)  Nubes=%d%%  Icono=%s  Desc=%s\n",
+                      count, forecast[count].hora, temp, feels, tmin, tmax, hum, pop, rain3h, windS, windD, clouds,
+                      forecast[count].icono, forecast[count].description);
+
+        count++;
+        foundAny = true;
+        searchPos = (buffer.indexOf(",", idxHora) > 0) ? buffer.indexOf(",", idxHora) : idxHora + 1;
+        if (searchPos > 2000) {
+          buffer = buffer.substring(searchPos);
+          searchPos = 0;
+        }
+        if (count >= FORECAST_COUNT) break;
+      } else break;
+    }
+
+    if (!foundAny && buffer.length() > 8000) {
+      int cutPos = buffer.length() - 4000;
+      buffer = buffer.substring(cutPos);
+      searchPos = max(0, searchPos - cutPos);
+    }
+    delay(1);
+  }
+
+  http.end();
+
+  if (count > 0) {
+    lastForecastTime = ahora;
+    PRINT("\nForecast actualizado correctamente (", String(count));
+    PRINTS(" tramos).");
+  } else {
+    PRINTS("\nNo se pudieron extraer datos válidos del forecast.");
+  }
+}
+////////////////////////////////////////////////////////////////////////////
+////////////////////////////////////////////////////////////////////////////
+////////////////////////////////////////////////////////////////////////////
+// ===============================================================
+// Función: actualizarSunTimes
+// - Calcula inicioSol, finalSol y tiempoSol (formato "HH:MM", 5 chars)
+// - Usa sunrise/sunset en epoch UTC (unsigned long) y timezoneShift en segundos
+// - Si sunrise/sunset == 0 o timezoneShift desconocido -> deja "--:--"
+// ===============================================================
+////////////////////////////////////////////////////////////////////////////
+void actualizarSunTimes(unsigned long sunriseUTC, unsigned long sunsetUTC, long timezoneShiftSec) {
+  // Valores por defecto si no hay datos
+  inicioSol = "--:--";
+  finalSol  = "--:--";
+  tiempoSol = "--:--";
+
+  // Validación básica
+  if (sunriseUTC == 0 || sunsetUTC == 0) {
+    return;
+  }
+
+  // Convertir a tiempo local sumando timezone shift (segundos)
+  unsigned long sunriseLocalEpoch = sunriseUTC + (unsigned long)timezoneShiftSec;
+  unsigned long sunsetLocalEpoch  = sunsetUTC  + (unsigned long)timezoneShiftSec;
+
+  // Convertir a tm_struct usando gmtime() porque ya aplicamos el shift
+  time_t t1 = (time_t)sunriseLocalEpoch;
+  time_t t2 = (time_t)sunsetLocalEpoch;
+
+  struct tm tm1;
+  struct tm tm2;
+
+  // gmtime_r / gmtime may or may not be available; usar gmtime seguro
+  // (en ESPs gmtime_r no siempre existe): usar gmtime() y copiar resultado.
+  struct tm *ptm;
+  ptm = gmtime(&t1);
+  if (ptm == NULL) return;
+  tm1 = *ptm;
+
+  ptm = gmtime(&t2);
+  if (ptm == NULL) return;
+  tm2 = *ptm;
+
+  // Formatear "HH:MM" con espacio en la decena si hora < 10
+  char bufStart[6]; // " H:MM" o "HH:MM" + '\0'
+  char bufEnd[6];
+  snprintf(bufStart, sizeof(bufStart), "%2d:%02d", tm1.tm_hour, tm1.tm_min);
+  snprintf(bufEnd,   sizeof(bufEnd),   "%2d:%02d", tm2.tm_hour, tm2.tm_min);
+
+  inicioSol = String(bufStart);
+  finalSol  = String(bufEnd);
+
+  // Duración del día = sunsetLocalEpoch - sunriseLocalEpoch
+  if (sunsetLocalEpoch > sunriseLocalEpoch) {
+    unsigned long diff = sunsetLocalEpoch - sunriseLocalEpoch;
+    int dh = diff / 3600;
+    int dm = (diff % 3600) / 60;
+    char bufDur[6];
+    // Aseguramos formato HH:MM (si dh >= 100 truncar a 99)
+    if (dh > 99) dh = 99;
+    snprintf(bufDur, sizeof(bufDur), "%2d:%02d", dh, dm);
+    tiempoSol = String(bufDur);
+  } else {
+    tiempoSol = "--:--";
   }
 }
 //////////////////////////////////////////////////////////////////
@@ -537,13 +929,28 @@ void mostrarPantalla(int pantalla) {
 
       // Velocidad del viento
       cargarViento();
-      
-      display.display();
       break;
 
     // --- Pantalla 3: Fecha y Hora ---
     case 2:
       Oled_Time();
+      break;
+
+    // --- Pantalla 4: Forecast >>> Cielo y Nubosidad % 
+    case 3:   
+      nScreen = false;
+      previsionWeather();
+      break;
+
+    // --- Pantalla 5: Forecast >>> Precipitación % y Temperatura
+    case 4:   
+      nScreen = false;
+      previsionWeather2();
+      break;
+
+    // --- Pantalla 6: Salida y puesta de Sol + duración del día
+    case 5:   
+      horasSol();
       break;
   }
 }
@@ -626,6 +1033,7 @@ void cargarViento() {
   display.print(wind, 0);
   if (wind < 99.5) display.print(" ");
   display.println("kmh");
+  display.display();
 }
 //////////////////////////////////////////////////////////////////////
 void dibujarSol() {
@@ -806,7 +1214,205 @@ void Oled_Time() {
   display.print("(" + CurrentTime.substring(6,8) + ")");
   display.display();
 }
+//////////////////////////////////////////////////////
+// --- Pantalla 4: Forecast >>> Cielo y Nubosidad % //
+//////////////////////////////////////////////////////
+void previsionWeather() {
+    // Alterna los datos de la previsión: Cielo y Nubosidad % 
+    // y reinicia el temporizador
+    nScreen = !nScreen;
+    lastIntervalChange = millis();
+   
+    // Cabecera
+    display.clearDisplay();
+    display.setTextSize(pantallaGrande ? 2 : 1);
+    display.setCursor(pantallaGrande ? 0 : 0, 0);
+    if (!nScreen) {
+      display.println(F("PREVISION:"));
+    }else {
+      display.println(F("NUBOSIDAD:"));
+    }
+    if (!pantallaGrande) display.drawLine(0, 8, 63, 8, WHITE);
+  
+    // Tres tramos de 3 horas
+    for (int i = 0; i < FORECAST_COUNT; i++) {
+      int y = pantallaGrande ? (14 + i * 15)+2 : (10 + i * 12)+2;
+      display.setTextSize(pantallaGrande ? 2 : 1);
+      display.setCursor(0, y);
+
+      // Hora: "HH"
+      char hora_s[3] = {0};
+      if (strlen(forecast[i].hora) >= 2) strncpy(hora_s, forecast[i].hora, 2);
+      else strcpy(hora_s, "--");
+
+       // Traducir icono a texto corto
+      String ic = String(forecast[i].icono);
+      String iconoTxt = "-----";
+  
+      if      (ic.indexOf("01d") >= 0) iconoTxt = "Sol";
+      else if (ic.indexOf("01n") >= 0) iconoTxt = "Despej";
+      else if (ic.indexOf("02")  >= 0) iconoTxt = "Nubes";
+      else if (ic.indexOf("03")  >= 0) iconoTxt = "Nublad";
+      else if (ic.indexOf("04")  >= 0) iconoTxt = "Cubier";
+      else if (ic.indexOf("09")  >= 0) iconoTxt = "Lluvia";
+      else if (ic.indexOf("10")  >= 0) iconoTxt = "Lluvia";
+      else if (ic.indexOf("11")  >= 0) iconoTxt = "Tormen";
+      else if (ic.indexOf("13")  >= 0) iconoTxt = "Nieve";
+      else if (ic.indexOf("50")  >= 0) iconoTxt = "Bruma";
+
+      // Nubosidad %
+      String nubes = String(forecast[i].clouds)+ "%";
+
+      // Alterna los datos de la previsión
+      display.print(hora_s);
+      display.print(F("H "));
+      if (!nScreen) {
+        // Ejemplo: "09H Nublad"
+        display.print(iconoTxt);
+      }else {
+        // Ejemplo: "09H N:45% "
+        display.print(F("N:"));
+        display.print(nubes);
+      }
+    }
+    display.display();
+  }
+////////////////////////////////////////////////////////////////
+// --- Pantalla 5: Forecast >>> Precipitación % y Temperatura //
+////////////////////////////////////////////////////////////////
+void previsionWeather2() {
+    // Alterna los datos de la previsión: Precipitación % y Temperatura
+    // y reinicia el temporizador
+    nScreen = !nScreen;
+    lastIntervalChange = millis();
+   
+    // Cabecera
+    display.clearDisplay();
+    display.setTextSize(pantallaGrande ? 2 : 1);
+    display.setCursor(pantallaGrande ? 0 : 0, 0);
+    if (!nScreen) {
+      display.print(F("PRE.LLUVIA"));
+    }else {
+      display.print(F("PREVIS. "));
+      display.print((char)247);
+      display.print(F("C"));
+    }
+    if (!pantallaGrande) display.drawLine(0, 8, 63, 8, WHITE);
+  
+    // Tres tramos de 3 horas
+    for (int i = 0; i < FORECAST_COUNT; i++) {
+      int y = pantallaGrande ? (14 + i * 15)+2 : (10 + i * 12)+2;
+      display.setTextSize(pantallaGrande ? 2 : 1);
+      display.setCursor(0, y);
+
+      // Hora: "HH"
+      char hora_s[3] = {0};
+      if (strlen(forecast[i].hora) >= 2) strncpy(hora_s, forecast[i].hora, 2);
+      else strcpy(hora_s, "--");
+
+      // Precipitación lluvia %
+      String lluvia = String(forecast[i].pop);
+      if (lluvia == "100") {
+        lluvia = "  100%";
+      }else{
+        lluvia = "un " + lluvia + "%";
+      }
+      
+      // Temperatura con 1 decimal
+      float temp = forecast[i].temperatura;
+      
+      // Alterna los datos de la previsión
+      display.print(hora_s);
+      display.print(F("H "));
+      if (!nScreen) {
+        // Ejemplo: "09H un 23%"
+        display.print(lluvia);
+      }else {
+        // Ejemplo: "09H 21.3ºC"
+        display.print(temp, 1);
+        display.print((char)247);
+        display.print(F("C"));
+      }
+    }
+    display.display();
+  }
 /////////////////////////////////////////////////////
+void webForecast() {
+  // Tres tramos de 3 horas
+  PRINTS("\n>>> WebForecast <<<\n");
+  for (int i = 0; i < FORECAST_COUNT; i++) {
+    // Hora: "HH"
+    char hora_s[3] = {0};
+    if (strlen(forecast[i].hora) >= 2) strncpy(hora_s, forecast[i].hora, 2);
+    else strcpy(hora_s, "--");
+  
+    // Precipitación lluvia %
+    String lluvia = String(forecast[i].pop) + "%";
+
+    // Nubosidad %
+    String nubes = String(forecast[i].clouds)+ "%";
+    
+    // Temperatura con 1 decimal
+    float temp = forecast[i].temperatura;
+    
+     // Traducir icono a texto corto
+    String ic = String(forecast[i].icono);
+    String iconoTxt = "-----";
+  
+    if      (ic.indexOf("01d") >= 0) iconoTxt = "Sol";
+    else if (ic.indexOf("01n") >= 0) iconoTxt = "Despejado";
+    else if (ic.indexOf("02")  >= 0) iconoTxt = "Nubes";
+    else if (ic.indexOf("03")  >= 0) iconoTxt = "Nublado";
+    else if (ic.indexOf("04")  >= 0) iconoTxt = "Cubierto";
+    else if (ic.indexOf("09")  >= 0) iconoTxt = "Lluvia";
+    else if (ic.indexOf("10")  >= 0) iconoTxt = "Lluvia";
+    else if (ic.indexOf("11")  >= 0) iconoTxt = "Tormenta";
+    else if (ic.indexOf("13")  >= 0) iconoTxt = "Nieve";
+    else if (ic.indexOf("50")  >= 0) iconoTxt = "Bruma";
+  
+    String m = "00";
+    if (String(hora_s) == "--") m = "--";
+    String cadena = String(hora_s) + ":" + m + " [" + String(temp,1) + "ºC] " + iconoTxt;
+    cadena += ", " + nubes + " de nubes y " + lluvia + " riesgo de lluvia";  
+    Serial.println (cadena);
+    webpage += cadena  + "<br>";
+  }
+}
+//////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+void horasSol() {
+    // Cabecera
+    display.clearDisplay();
+    display.setTextSize(pantallaGrande ? 2 : 1);
+    display.setCursor(pantallaGrande ? 0 : 0, 0);
+    display.println(F("HORAS SOL:"));
+    if (!pantallaGrande) display.drawLine(0, 8, 63, 8, WHITE);
+
+    for (int i = 0; i < 3; i++) {
+      int y = pantallaGrande ? (14 + i * 15)+2 : (10 + i * 12)+2;
+      display.setTextSize(pantallaGrande ? 2 : 1);
+      display.setCursor(0, y);
+      if (i == 0) {
+        display.print(F("DIA: "));
+        display.print(tiempoSol);
+      }else if (i == 1) {
+        display.print(F("Fin: "));
+        display.print(finalSol);
+      }else {
+        display.print(F("Ini: "));
+        display.print(inicioSol);
+      }
+    }
+    display.display();
+}
+/////////////////////////////////////////////////////
+void webLuzSolar() {
+    // Tres tramos de 3 horas
+    PRINTS("\n>>> WebLuzSolar <<<\n");
+
+    String cadena = "Sol desde las " + inicioSol + " hasta las " + finalSol + " [" + tiempoSol + " hoy]";
+    Serial.println (cadena);
+    webpage += cadena  + "<br>";
+}
 //////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 // Choose your time zone from: https://github.com/nayarsystems/posix_tz_db/blob/master/zones.csv 
 // See below for examples
@@ -955,7 +1561,6 @@ void display_flash() {
     delay(40);
     if (!pantallaGrande) delay(40);
   }
-  delay(1000);
 }
 //////////////////////////////////////////////////////////////
 void display_ip() {
@@ -1169,7 +1774,7 @@ void NTP_Clock_home_page() {
   webpage += "<br>";
   webpage += "Refresh: " + CurrentDate + " - " + CurrentTime;
   webpage += "<br>";
-  webpage += weatherLoc + " = " + String(temp,1) + "ºC - Hr: " + String(humidity,0) + "%";
+  webpage += weatherLoc + " = " + String(temp,1) + "ºC - Hr: " + String(humidity,0) + "%<br>";
 
   ///////////////////////////////////////////////////////////////////////
   // =========================================
@@ -1249,6 +1854,11 @@ void NTP_Clock_home_page() {
   webpage += "</script>";
 
   ///////////////////////////////////////////////////////////////////////
+  webpage += "<label style='font-size:12px;'>";
+  webForecast();
+  webpage += "</label><label style='font-size:24px;'>";
+  webLuzSolar();
+  webpage += "</label>";
   webpage += "</h3>";
   
   webpage += "<div id=\"section\">";
@@ -1488,4 +2098,4 @@ void checkServer() {
   });
 
 }
-/////////////////////////////////////////////////////////////////
+/////////////////////////////////////////////////////////////////////////
