@@ -1,4 +1,4 @@
-# ESP WeatherClock NTP Firmware — v1.15
+# ESP WeatherClock NTP Firmware — v1.16
 
 This firmware transforms a low-cost ESP-based weather kit into a full Internet-synchronized meteorological station.  
 It supports **ESP01, ESP8266, and ESP32** modules, along with **OLED displays (0.6" or 0.96")** using the SSD1306 driver.
@@ -7,9 +7,10 @@ Version **v1.14** introduces major improvements in memory usage, weather forecas
 
 Version **v1.15** it initially displays the date and time, waiting until it synchronizes with the NTP server. Management and organization are improved by displaying data on the OLED display.
 
+Version **v1.16** Fixes the BUG of the two previous versions (v1.14 & v1.15), when a fixed UTC region is activated.
 ---
 
-## ✔️ New since v1.14
+## New since v1.14
 - Added **real-time weather forecast** extracted directly from OpenWeatherMap:
   - 3 upcoming forecast segments (3h, 6h, 9h)
   - Automatic interpretation of all official OWM weather icons (day/night variants)
@@ -24,6 +25,9 @@ Version **v1.15** it initially displays the date and time, waiting until it sync
   - Includes refresh button (data refresh without forcing new API requests)
 - More accurate NTP synchronization and timezone handling
 - Improved overall stability and error handling
+
+## ✔️ IMPORTANT since v1.16
+- Fixes the BUG of the two previous versions (v1.14 & v1.15), when a fixed UTC region is activated.
 
 ---
 
@@ -63,7 +67,7 @@ Use the Arduino IDE:
 
 ## Credits
 Developed by J-RPM.  
-Version: **v1.15**
+Version: **v1.16**
 
 YouTube:  
 https://youtu.be/hKXPpA2Ls1I
