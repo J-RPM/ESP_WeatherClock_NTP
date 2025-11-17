@@ -5,9 +5,7 @@ It supports **ESP01, ESP8266, and ESP32** modules, along with **OLED displays (0
 
 Version **v1.14** introduces major improvements in memory usage, weather forecasting, and solar event calculations.
 
-Version **v1.15** 
-1 - It initially displays the date and time, waiting until it synchronizes with the NTP server.
-2 - Management and organization are improved by displaying data on the OLED display.
+Version **v1.15** it initially displays the date and time, waiting until it synchronizes with the NTP server. Management and organization are improved by displaying data on the OLED display.
 
 ---
 
