@@ -2,7 +2,7 @@
                              ***** ESP_NTP_Weather ******
                              * Compatible ESP32/ESP8266 *
                              ****************************
-       (v1.15) >>> Muestra la Fecha, Hora y los datos meteorológicos
+       (v1.16) >>> Muestra la Fecha, Hora y los datos meteorológicos
                                Copyright: J_RPM 
                                http://j-rpm.com/
                         https://www.youtube.com/c/JRPM
@@ -122,7 +122,7 @@
 /////////////////////////////////
 
 // ===================== CONFIGURACIÓN =====================
-static String HWversion = "(v1.15)";
+static String HWversion = "(v1.16)";
 bool Test = false;  // Test de los iconos del tiempo en OLED
 String CurrentTime, CurrentDate, webpage = "";
 
@@ -346,6 +346,10 @@ void setup() {
   display_flash();
 
 
+  // Carga la configuración de la EEPROM (API key, city, zone, etc.)
+  EEPROM.begin(EEPROM_SIZE);
+  loadConfig();
+
   // Syncronize Time and Date
   if (!SetupTime()) {
     PRINTS("\nTimeOut SetupTime, restarting!!!");
@@ -355,11 +359,7 @@ void setup() {
   
   // Muestra memoria libre inicial y antes de parsear el JSON
   imprimirHeapInfo();
-  
-  // Carga la configuración de la EEPROM (API key, city, zone, etc.)
-  EEPROM.begin(EEPROM_SIZE);
-  loadConfig();
-  
+    
   obtenerClima();
   lastWeatherUpdate = millis();
   lastScreenChange = millis();
