@@ -2,7 +2,7 @@
                              ***** ESP_NTP_Weather ******
                              * Compatible ESP32/ESP8266 *
                              ****************************
-       (v1.14) >>> Muestra la Fecha, Hora y los datos meteorológicos
+       (v1.15) >>> Muestra la Fecha, Hora y los datos meteorológicos
                                Copyright: J_RPM 
                                http://j-rpm.com/
                         https://www.youtube.com/c/JRPM
@@ -122,7 +122,7 @@
 /////////////////////////////////
 
 // ===================== CONFIGURACIÓN =====================
-static String HWversion = "(v1.14)";
+static String HWversion = "(v1.15)";
 bool Test = false;  // Test de los iconos del tiempo en OLED
 String CurrentTime, CurrentDate, webpage = "";
 
@@ -389,7 +389,17 @@ void loop() {
    ESP.restart();
   }
 
-  // En modo Test, sólo muestra la lista de los iconos
+  // Actualiza el estado actual del clima de forma periódica 
+  if (millis() - lastWeatherUpdate > weatherUpdateInterval) {
+    obtenerClima();
+    // Actualiza cada 2h solo si corresponde
+    actualizarForecast();  
+  }
+
+  ///////////////////////////////////////////////////////
+  //        *** PRESENTACIÓN OLED ***                  //  
+  // Modo Test >>> sólo muestra la lista de los iconos //
+  ///////////////////////////////////////////////////////
   if (Test) {
       display.clearDisplay();
       display.setTextColor(WHITE);
@@ -438,36 +448,31 @@ void loop() {
       // Velocidad del viento
       cargarViento();
   }else {
-    // Si se está mostrando la fecha y hora, se actualiza
-    if (currentScreen == 2) {
-      Oled_Time();
-    // Si se está mostrando la previsión del tiempo, gestiona los cambios
-    }else if (!Test && (millis() - lastIntervalChange > previsionInterval)) {
-      // Alterna la información de la previsión a mostrar
-      if (currentScreen == 3) {
-        previsionWeather();
-      }else if (currentScreen == 4) {
-        previsionWeather2();
+    //////////////////////////////////////////////////////
+    // Modo normal >>> Selecciona la pantalla a mostrar //
+    //////////////////////////////////////////////////////
+    if (millis() - lastScreenChange > screenInterval) {
+      currentScreen = (currentScreen + 1) % 6; // ahora 6 pantallas
+      mostrarPantalla(currentScreen);
+      lastScreenChange = millis();
+      lastIntervalChange = millis();
+    }else {
+      // Si se está mostrando la fecha y hora, se refresca en pantalla
+      if (currentScreen == 0) {
+        Oled_Time();
+      // Si se está mostrando la previsión del tiempo, gestiona los cambios
+      }else if (!Test && (millis() - lastIntervalChange > previsionInterval)) {
+        // Alterna la información de la previsión a mostrar
+        if (currentScreen == 3) {
+          previsionWeather();
+        }else if (currentScreen == 4) {
+          previsionWeather2();
+        }
       }
     }
   }
-
-
-  // Vuelve a cargar el estado actual del clima 
-  if (millis() - lastWeatherUpdate > weatherUpdateInterval) {
-    obtenerClima();
-    // Actualiza cada 2h solo si corresponde
-    actualizarForecast();  
-  }
-
-
-  // Selecciona la pantalla a mostrar
-  if (millis() - lastScreenChange > screenInterval) {
-    currentScreen = (currentScreen + 1) % 6; // ahora 6 pantallas
-    if (!Test) mostrarPantalla(currentScreen);
-    lastScreenChange = millis();
-  }
 }
+/////////////////////////////////////////////////////////////////////
 // ==================================================================
     /*
     // City
@@ -554,9 +559,6 @@ void obtenerClima() {
       actualizarSunTimes(gSunrise, gSunset, gTimezoneShift);
       Serial.printf("[INFO] inicioSol='%s' finalSol='%s' tiempoSol='%s'\n",
                     inicioSol.c_str(), finalSol.c_str(), tiempoSol.c_str());
-
-      // Actualizar pantalla con los nuevos datos
-      mostrarPantalla(currentScreen);
 
     } else {
       PRINT("\nError HTTP: ", httpCode);
@@ -852,8 +854,13 @@ void mostrarPantalla(int pantalla) {
   display.setTextColor(WHITE);
 
   switch (pantalla) {
-    // --- Pantalla 1: Localidad, Temperatura, Humedad y Presión ---
+    // --- Pantalla 1: Fecha y Hora ---
     case 0:
+      Oled_Time();
+      break;
+    
+    // --- Pantalla 2: Localidad, Temperatura, Humedad y Presión ---
+    case 1:
       // Localidad
       if (pantallaGrande) {
         display.setTextSize(2);
@@ -900,8 +907,8 @@ void mostrarPantalla(int pantalla) {
       display.display();
       break;
 
-    // --- Pantalla 2: Descripción, Sensación térmica, Icono y Viento ---
-    case 1:
+    // --- Pantalla 3: Descripción, Sensación térmica, Icono y Viento ---
+    case 2:
       if (pantallaGrande) {
         display.setTextSize(2);
       }else {
@@ -929,11 +936,6 @@ void mostrarPantalla(int pantalla) {
 
       // Velocidad del viento
       cargarViento();
-      break;
-
-    // --- Pantalla 3: Fecha y Hora ---
-    case 2:
-      Oled_Time();
       break;
 
     // --- Pantalla 4: Forecast >>> Cielo y Nubosidad % 
@@ -1227,10 +1229,10 @@ void previsionWeather() {
     display.clearDisplay();
     display.setTextSize(pantallaGrande ? 2 : 1);
     display.setCursor(pantallaGrande ? 0 : 0, 0);
-    if (!nScreen) {
+    if (nScreen) {
       display.println(F("PREVISION:"));
     }else {
-      display.println(F("NUBOSIDAD:"));
+      display.println(F("PREV.NUBES"));
     }
     if (!pantallaGrande) display.drawLine(0, 8, 63, 8, WHITE);
   
@@ -1266,7 +1268,7 @@ void previsionWeather() {
       // Alterna los datos de la previsión
       display.print(hora_s);
       display.print(F("H "));
-      if (!nScreen) {
+      if (nScreen) {
         // Ejemplo: "09H Nublad"
         display.print(iconoTxt);
       }else {
@@ -1290,7 +1292,7 @@ void previsionWeather2() {
     display.clearDisplay();
     display.setTextSize(pantallaGrande ? 2 : 1);
     display.setCursor(pantallaGrande ? 0 : 0, 0);
-    if (!nScreen) {
+    if (nScreen) {
       display.print(F("PRE.LLUVIA"));
     }else {
       display.print(F("PREVIS. "));
@@ -1324,7 +1326,7 @@ void previsionWeather2() {
       // Alterna los datos de la previsión
       display.print(hora_s);
       display.print(F("H "));
-      if (!nScreen) {
+      if (nScreen) {
         // Ejemplo: "09H un 23%"
         display.print(lluvia);
       }else {
