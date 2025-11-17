@@ -8,6 +8,7 @@ Version **v1.14** introduces major improvements in memory usage, weather forecas
 Version **v1.15** it initially displays the date and time, waiting until it synchronizes with the NTP server. Management and organization are improved by displaying data on the OLED display.
 
 Version **v1.16** Fixes the BUG of the two previous versions (v1.14 & v1.15), when a fixed UTC region is activated.
+
 ---
 
 ## New since v1.14
